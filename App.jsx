@@ -1,109 +1,97 @@
-/* eslint-disable @typescript-eslint/no-var-requires */
-import * as React from 'react';
-
-import {StyleSheet, View, Text, ActivityIndicator} from 'react-native';
-import {
-  Tensor,
-  TensorflowModel,
-  useTensorflowModel,
-} from 'react-native-fast-tflite';
+import React, {useEffect, useRef, useState} from 'react';
+import {StyleSheet, View, Text, Image} from 'react-native';
 import {
   Camera,
   useCameraDevice,
   useCameraPermission,
   useFrameProcessor,
 } from 'react-native-vision-camera';
-import {useResizePlugin} from 'vision-camera-resize-plugin';
-import labels from './src/utils/labels';
+import BackgroundTimer from 'react-native-background-timer';
+import axios from 'axios';
 
-function tensorToString(tensor: Tensor): string {
-  return `\n  - ${tensor.dataType} ${tensor.name}[${tensor.shape}]`;
-}
-function modelToString(model: TensorflowModel): string {
-  return (
-    `TFLite Model (${model.delegate}):\n` +
-    `- Inputs: ${model.inputs.map(tensorToString).join('')}\n` +
-    `- Outputs: ${model.outputs.map(tensorToString).join('')}`
-  );
-}
-
-export default function App(): React.ReactNode {
+export default function App() {
   const {hasPermission, requestPermission} = useCameraPermission();
+
+  const cameraRef = useRef(null);
+  const [prediction, setPrediction] = useState(null);
+  const [loading, setLoading] = useState(false);
   const device = useCameraDevice('back');
 
-  // from https://www.kaggle.com/models/tensorflow/efficientdet/frameworks/tfLite
-  const model = useTensorflowModel(require('./assets/model.tflite'));
-  const actualModel = model.state === 'loaded' ? model.model : undefined;
-
-  React.useEffect(() => {
-    if (actualModel == null) return;
-    console.log(`Model loaded! Shape:\n${modelToString(actualModel)}]`);
-  }, [actualModel]);
-
-  const {resize} = useResizePlugin();
-
-  const frameProcessor = useFrameProcessor(
-    frame => {
-      'worklet';
-      if (actualModel == null) {
-        // model is still loading...
-        return;
-      }
-
-      console.log(`Running inference on ${frame}`);
-      const resized = resize(frame, {
-        scale: {
-          width: 640,
-          height: 480,
-        },
-        pixelFormat: 'rgb',
-        dataType: 'uint8',
-      });
-      const result = actualModel.runSync([resized]);
-      const probabilities = result[0];
-      console.log(probabilities);
-      const labeledProbabilities = labels.map((label, index) => ({
-        label,
-        probability: probabilities[index],
-      }));
-      labeledProbabilities.sort((a, b) => b.probability - a.probability);
-      // Get top-k results
-      const topKResults = labeledProbabilities.slice(0, 3); // Adjust k as needed
-
-      console.log('Top-K Results:');
-      topKResults.forEach(res => {
-        console.log(`${res.label}: ${res.probability}`);
-      });
-    },
-    [actualModel],
-  );
-
-  React.useEffect(() => {
+  useEffect(() => {
     requestPermission();
   }, [requestPermission]);
 
-  console.log(`Model: ${model.state} (${model.model != null})`);
+  useEffect(() => {
+    const fetchPrediction = async () => {
+      if (!cameraRef.current) return;
+
+      setLoading(true);
+
+      // Capture the current frame
+      const data = await cameraRef.current.takePhoto();
+      console.log(data);
+
+      // Send the frame to the server
+      const formData = new FormData();
+      formData.append('image', {
+        uri: data.path,
+        type: 'image/jpeg',
+        name: 'frame.jpg',
+      });
+
+      try {
+        const response = await axios.post(
+          'http://192.168.2.108:3000/',
+          formData,
+          {
+            headers: {
+              'Content-Type': 'multipart/form-data',
+            },
+          },
+        );
+        setPrediction(response.data);
+      } catch (error) {
+        console.error(
+          'Error sending image to server:',
+          error,
+          error?.message,
+          error?.data?.message,
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    // Fetch prediction every 5 seconds
+    const intervalId = BackgroundTimer.setInterval(fetchPrediction, 5000);
+
+    return () => {
+      BackgroundTimer.clearInterval(intervalId);
+    };
+  }, []);
 
   return (
     <View style={styles.container}>
       {hasPermission && device != null ? (
-        <Camera
-          device={device}
-          style={StyleSheet.absoluteFill}
-          isActive={true}
-          frameProcessor={frameProcessor}
-          pixelFormat="yuv"
-        />
+        <>
+          <Camera
+            ref={cameraRef}
+            device={device}
+            style={styles.camera}
+            photo
+            isActive={true}
+            pixelFormat="yuv"
+          />
+          {loading ? (
+            <Text>Loading...</Text>
+          ) : (
+            <Text>
+              Prediction: {prediction ? JSON.stringify(prediction) : 'None'}
+            </Text>
+          )}
+        </>
       ) : (
         <Text>No Camera available.</Text>
-      )}
-
-      {model.state === 'loading' && (
-        <ActivityIndicator size="small" color="white" />
-      )}
-
-      {model.state === 'error' && (
-        <Text>Failed to load model! {model.error.message}</Text>
       )}
     </View>
   );
@@ -114,5 +102,9 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  camera: {
+    flex: 1,
+    width: '100%',
   },
 });
