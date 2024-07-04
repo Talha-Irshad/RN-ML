@@ -1,75 +1,87 @@
 import React, {useEffect, useRef, useState} from 'react';
-import {StyleSheet, View, Text, Image} from 'react-native';
+import {StyleSheet, View, Text, Dimensions, FlatList} from 'react-native';
 import {
   Camera,
   useCameraDevice,
   useCameraPermission,
-  useFrameProcessor,
 } from 'react-native-vision-camera';
-import BackgroundTimer from 'react-native-background-timer';
 import axios from 'axios';
+import ImageResizer from '@bam.tech/react-native-image-resizer';
 
 export default function App() {
   const {hasPermission, requestPermission} = useCameraPermission();
 
   const cameraRef = useRef(null);
-  const [prediction, setPrediction] = useState(null);
+  const [prediction, setPrediction] = useState([]);
   const [loading, setLoading] = useState(false);
-  const device = useCameraDevice('back');
+  const device = useCameraDevice('front');
 
   useEffect(() => {
     requestPermission();
   }, [requestPermission]);
 
-  useEffect(() => {
-    const fetchPrediction = async () => {
-      if (!cameraRef.current) return;
+  const onCaputre = async () => {
+    const data = await cameraRef.current.takePhoto({enableShutterSound: false});
 
-      setLoading(true);
-
-      // Capture the current frame
-      const data = await cameraRef.current.takePhoto();
-      console.log(data);
-
-      // Send the frame to the server
+    try {
+      const resized = await ImageResizer.createResizedImage(
+        data.path,
+        500,
+        500,
+        'JPEG',
+        50,
+      );
       const formData = new FormData();
-      formData.append('image', {
-        uri: data.path,
+      formData.append('file', {
+        uri: `file://${resized.path}`,
         type: 'image/jpeg',
         name: 'frame.jpg',
       });
 
-      try {
-        const response = await axios.post(
-          'http://192.168.2.108:3000/',
-          formData,
-          {
-            headers: {
-              'Content-Type': 'multipart/form-data',
-            },
+      const response = await axios.post(
+        'http://ai-sign-env-1.eba-z9pwwi3e.us-east-1.elasticbeanstalk.com/recognize',
+        formData,
+        {
+          headers: {
+            'Content-Type': 'multipart/form-data',
           },
-        );
-        setPrediction(response.data);
-      } catch (error) {
-        console.error(
-          'Error sending image to server:',
-          error,
-          error?.message,
-          error?.data?.message,
-        );
-      } finally {
-        setLoading(false);
-      }
-    };
+          onUploadProgress: progressEvent => {
+            const percentCompleted = Math.round(
+              (progressEvent.loaded * 100) / progressEvent.total,
+            );
+            console.log(percentCompleted);
+          },
+        },
+      );
+      setPrediction(prev => {
+        let arr = prev?.length > 0 ? [...prev] : [];
+        if (response.data?.gesture && response.data?.gesture !== '?') {
+          arr.unshift({key: Date.now(), gesture: response.data?.gesture});
+        }
+        return arr;
+      });
+    } catch (error) {
+      console.error(
+        'Error sending image to server:',
+        error,
+        error?.message,
+        error?.data?.message,
+        error?.response?.data,
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
 
+  useEffect(() => {
     // Fetch prediction every 5 seconds
-    const intervalId = BackgroundTimer.setInterval(fetchPrediction, 5000);
+    const intervalId = setInterval(onCaputre, 1000);
 
     return () => {
-      BackgroundTimer.clearInterval(intervalId);
+      clearInterval(intervalId);
     };
   }, []);
-
+  console.log(prediction?.length);
   return (
     <View style={styles.container}>
       {hasPermission && device != null ? (
@@ -83,15 +95,49 @@ export default function App() {
             pixelFormat="yuv"
           />
           {loading ? (
-            <Text>Loading...</Text>
+            <Text style={{color: 'white'}}>Loading...</Text>
           ) : (
-            <Text>
-              Prediction: {prediction ? JSON.stringify(prediction) : 'None'}
-            </Text>
+            <>
+              {prediction?.length > 0 ? (
+                <FlatList
+                  contentContainerStyle={{
+                    backgroundColor: 'black',
+                    width: Dimensions.get('window').width,
+                    height: Dimensions.get('window').height / 2,
+                  }}
+                  keyExtractor={item => item.key}
+                  style={{flex: 1, backgroundColor: 'black'}}
+                  data={prediction}
+                  renderItem={({item}) => (
+                    <View
+                      style={{
+                        width: Dimensions.get('window').width,
+                        height: 50,
+                        justifyContent: 'center',
+                        alignItems: 'center',
+                      }}>
+                      <Text style={{color: 'white'}}>{item?.gesture}</Text>
+                    </View>
+                  )}
+                />
+              ) : (
+                <View
+                  style={{
+                    width: Dimensions.get('window').width,
+                    height: Dimensions.get('window').height / 3,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                  }}>
+                  <Text style={{color: 'white'}}>
+                    Prediction will be shown here
+                  </Text>
+                </View>
+              )}
+            </>
           )}
         </>
       ) : (
-        <Text>No Camera available.</Text>
+        <Text style={{color: 'white'}}>No Camera available.</Text>
       )}
     </View>
   );
